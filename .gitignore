@@ -1,6 +1,9 @@
 # --- Secrets: NEVER commit these ---
 .streamlit/secrets.toml
 
+# --- Internal assistant/project notes (kept local only) ---
+CLAUDE.md
+
 # --- Virtual env ---
 .venv/
 venv/
