@@ -56,9 +56,19 @@ DISPLAY_W = 720
 # Auth + secrets
 # ---------------------------------------------------------------------------
 
+def _secret(name: str):
+    """Read a secret from st.secrets (cloud) falling back to env (local dev)."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:  # noqa: BLE001 - no secrets.toml locally
+        pass
+    return os.environ.get(name)
+
+
 def _inject_api_key() -> None:
-    """Expose the Claude key (from st.secrets) to claude_extractor via env."""
-    key = st.secrets.get("ANTHROPIC_API_KEY") if hasattr(st, "secrets") else None
+    """Expose the Claude key to claude_extractor via the environment."""
+    key = _secret("ANTHROPIC_API_KEY")
     if key:
         os.environ["ANTHROPIC_API_KEY"] = key
 
@@ -67,11 +77,18 @@ def require_password() -> None:
     """Block the app behind a single shared password (st.stop if not authed)."""
     if st.session_state.get("auth_ok"):
         return
+    expected = _secret("APP_PASSWORD")
     st.title("BV Extractor")
     st.caption("Biyolojik varyasyon tablosu çıkarıcı")
+    if not expected:
+        st.error(
+            "APP_PASSWORD tanımlı değil. Bulutta 'Secrets' paneline, yerelde "
+            "ortam değişkeni veya .streamlit/secrets.toml içine ekleyin."
+        )
+        st.stop()
     pw = st.text_input("Şifre", type="password")
     if st.button("Giriş"):
-        if pw and pw == st.secrets.get("APP_PASSWORD"):
+        if pw and pw == expected:
             st.session_state["auth_ok"] = True
             st.rerun()
         else:
