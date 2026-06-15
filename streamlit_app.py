@@ -79,20 +79,20 @@ def require_password() -> None:
         return
     expected = _secret("APP_PASSWORD")
     st.title("BV Extractor")
-    st.caption("Biyolojik varyasyon tablosu çıkarıcı")
+    st.caption("Biological variation table extractor")
     if not expected:
         st.error(
-            "APP_PASSWORD tanımlı değil. Bulutta 'Secrets' paneline, yerelde "
-            "ortam değişkeni veya .streamlit/secrets.toml içine ekleyin."
+            "APP_PASSWORD is not set. Add it to the cloud 'Secrets' panel, or "
+            "to an environment variable / .streamlit/secrets.toml locally."
         )
         st.stop()
-    pw = st.text_input("Şifre", type="password")
-    if st.button("Giriş"):
+    pw = st.text_input("Password", type="password")
+    if st.button("Log in"):
         if pw and pw == expected:
             st.session_state["auth_ok"] = True
             st.rerun()
         else:
-            st.error("Yanlış şifre.")
+            st.error("Wrong password.")
     st.stop()
 
 
@@ -192,17 +192,17 @@ def main() -> None:
     require_password()
 
     st.title("BV Extractor")
-    st.caption("PDF makaleden biyolojik varyasyon tablosunu çıkar")
+    st.caption("Extract biological variation tables from a PDF article")
 
-    uploaded = st.file_uploader("PDF yükle", type=["pdf"])
+    uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
     if uploaded is None:
-        st.info("Başlamak için bir PDF yükleyin.")
+        st.info("Upload a PDF to begin.")
         return
 
     pdf_path = _save_upload(uploaded)
     profile = st.session_state["profile"]
 
-    with st.expander("Ön analiz", expanded=False):
+    with st.expander("Pre-analysis", expanded=False):
         st.text(format_profile(profile))
 
     left, right = st.columns([3, 2])
@@ -211,11 +211,11 @@ def main() -> None:
     with left:
         c1, c2 = st.columns([3, 1])
         page_num = c1.number_input(
-            "Sayfa", min_value=1, max_value=profile.page_count,
+            "Page", min_value=1, max_value=profile.page_count,
             value=st.session_state["page_index"] + 1,
         )
         st.session_state["page_index"] = int(page_num) - 1
-        if c2.button("Döndür ⟳"):
+        if c2.button("Rotate ⟳"):
             st.session_state["rotation"] = (st.session_state["rotation"] + 90) % 360
 
         page_index = st.session_state["page_index"]
@@ -226,8 +226,8 @@ def main() -> None:
         img_disp = img.resize((disp_w, disp_h))
 
         st.caption(
-            "Tabloyu çevreleyen kutu(lar) çizin (birden çok tablo için birden "
-            "çok kutu). Kutu çizmezseniz tüm sayfa gönderilir."
+            "Draw a box around the table(s) (one box per table). If you draw "
+            "none, the whole page is sent."
         )
         canvas_result = None
         if st_canvas is not None:
@@ -244,17 +244,19 @@ def main() -> None:
         else:
             st.image(img_disp)
             st.warning(
-                "streamlit-drawable-canvas kurulu değil — kutu çizimi devre "
-                "dışı; tüm sayfa gönderilecek. (requirements.txt'e ekleyin.)"
+                "streamlit-drawable-canvas is not installed — box drawing is "
+                "disabled; the whole page will be sent. (Add it to "
+                "requirements.txt.)"
             )
 
     # ---- right: controls + run ----------------------------------------
     with right:
-        use_claude = st.checkbox("Claude (LLM) kullan", value=False)
+        use_claude = st.checkbox("Use Claude (LLM)", value=False)
         st.caption(
-            "Kapalı: önce hızlı/yerel parser; değer bulamazsa Claude'a düşer."
+            "Off: try the fast local parser first; fall back to Claude if it "
+            "finds nothing."
         )
-        run = st.button("Çıkar ▶", type="primary")
+        run = st.button("Extract ▶", type="primary")
 
     if run:
         regions = _regions_from_canvas(
@@ -270,32 +272,32 @@ def main() -> None:
             if not use_claude:
                 result = extract(pdf_path)
                 if result.report.fields_extracted:
-                    st.success(f"Parser {len(result.analytes)} analit buldu.")
+                    st.success(f"Parser found {len(result.analytes)} analyte(s).")
                 else:
-                    st.info("Parser değer bulamadı — Claude'a gönderiliyor…")
-                    with st.spinner("Claude çıkarım yapıyor… (15–90 sn)"):
+                    st.info("Parser found no values — sending to Claude…")
+                    with st.spinner("Claude is extracting… (15–90 s)"):
                         result = extract_with_claude_regions(
                             pdf_path, whole_or_regions()
                         )
             else:
-                with st.spinner("Claude çıkarım yapıyor… (15–90 sn)"):
+                with st.spinner("Claude is extracting… (15–90 s)"):
                     result = extract_with_claude_regions(
                         pdf_path, whole_or_regions()
                     )
             st.session_state["result"] = result
         except Exception as exc:  # noqa: BLE001
             st.session_state["result"] = None
-            st.error(f"Çıkarım hatası: {exc}")
+            st.error(f"Extraction error: {exc}")
 
     # ---- results -------------------------------------------------------
     result = st.session_state.get("result")
     if result:
-        st.subheader("Sonuçlar")
+        st.subheader("Results")
         rows = _result_rows(result)
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
-            st.warning("Hiç analit çıkarılamadı.")
+            st.warning("No analytes were extracted.")
 
         if result.report.used_llm_fallback and (
             result.report.input_tokens or result.report.output_tokens
@@ -304,8 +306,8 @@ def main() -> None:
                 result.report.input_tokens, result.report.output_tokens
             )
             st.caption(
-                f"Token: {result.report.input_tokens} girdi / "
-                f"{result.report.output_tokens} çıktı  (~${cost:.3f})"
+                f"Tokens: {result.report.input_tokens} in / "
+                f"{result.report.output_tokens} out  (~${cost:.3f})"
             )
         for note in result.report.manual_review:
             st.caption(f"📝 {note}")
@@ -314,9 +316,9 @@ def main() -> None:
             xb, jb, tb = _result_files(result, st.session_state["stem"])
             d1, d2, d3 = st.columns(3)
             stem = st.session_state["stem"]
-            d1.download_button("Excel indir", xb, f"{stem}.xlsx")
-            d2.download_button("JSON indir", jb, f"{stem}.json")
-            d3.download_button("Rapor indir", tb, f"{stem}.txt")
+            d1.download_button("Download Excel", xb, f"{stem}.xlsx")
+            d2.download_button("Download JSON", jb, f"{stem}.json")
+            d3.download_button("Download report", tb, f"{stem}.txt")
 
 
 if __name__ == "__main__":
