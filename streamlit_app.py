@@ -23,6 +23,7 @@ so tkinter is not required on the server.
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import tempfile
@@ -123,6 +124,38 @@ def _save_upload(uploaded) -> str:
 def _page_image(pdf_path: str, page_index: int, rotation: int) -> Image.Image:
     png = render_region_png(pdf_path, page_index, rotation=rotation)
     return Image.open(io.BytesIO(png)).convert("RGB")
+
+
+def _canvas_drawing(img_disp: Image.Image) -> dict:
+    """Fabric.js JSON that paints the page image as a locked canvas object.
+
+    streamlit-drawable-canvas serves `background_image` through the server's
+    /media endpoint, and that request does not resolve inside the component
+    iframe on Streamlit Community Cloud, leaving a blank (transparent) canvas.
+    Embedding the page as a data-URL image object needs no extra request, so
+    it renders the same locally and in the cloud. The object is unselectable
+    and non-evented, so the rectangle tool draws over it normally.
+    """
+    buf = io.BytesIO()
+    img_disp.save(buf, format="JPEG", quality=85)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return {
+        "version": "4.4.0",
+        "objects": [{
+            "type": "image",
+            "version": "4.4.0",
+            "originX": "left",
+            "originY": "top",
+            "left": 0,
+            "top": 0,
+            "width": img_disp.width,
+            "height": img_disp.height,
+            "src": f"data:image/jpeg;base64,{b64}",
+            "selectable": False,
+            "evented": False,
+            "hasControls": False,
+        }],
+    }
 
 
 def _regions_from_canvas(canvas_result, page_index, rotation, w, h) -> list:
@@ -235,7 +268,8 @@ def main() -> None:
                 fill_color="rgba(255, 0, 0, 0.10)",
                 stroke_color="red",
                 stroke_width=2,
-                background_image=img_disp,
+                background_color="#ffffff",
+                initial_drawing=_canvas_drawing(img_disp),
                 drawing_mode="rect",
                 width=disp_w,
                 height=disp_h,
