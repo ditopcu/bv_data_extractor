@@ -91,8 +91,11 @@ def require_password() -> None:
             "to an environment variable / .streamlit/secrets.toml locally."
         )
         st.stop()
-    pw = st.text_input("Password", type="password")
-    if st.button("Log in"):
+    # A form so that pressing Enter in the field submits, not only the button.
+    with st.form("login", clear_on_submit=False):
+        pw = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log in")
+    if submitted:
         if pw and pw == expected:
             st.session_state["auth_ok"] = True
             st.rerun()
