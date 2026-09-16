@@ -24,6 +24,7 @@ so tkinter is not required on the server.
 from __future__ import annotations
 
 import base64
+import html
 import io
 import os
 import tempfile
@@ -227,6 +228,58 @@ def _fmt(v) -> str:
     return "" if v is None else f"{v:g}"
 
 
+LOG_BOX_HEIGHT_PX = 220
+
+
+def _log_box_html(lines: list) -> str:
+    """Fixed-height scrollable log that stays pinned to the newest line.
+
+    Streamlit strips <script>, so auto-scroll is done with CSS: a
+    `column-reverse` flex box starts scrolled at its end, and the lines are
+    emitted newest-first so they still read top-to-bottom chronologically.
+    """
+    items = "".join(
+        f"<div>{html.escape(ln)}</div>" for ln in reversed(lines)
+    )
+    return (
+        f'<div style="height:{LOG_BOX_HEIGHT_PX}px; overflow-y:auto; '
+        'display:flex; flex-direction:column-reverse; '
+        'font-family:ui-monospace, Consolas, monospace; font-size:0.82rem; '
+        'line-height:1.5; padding:0.3rem 0.6rem; '
+        'border:1px solid rgba(128,128,128,0.35); border-radius:0.3rem;">'
+        f"{items}</div>"
+    )
+
+
+USAGE_NOTES = """
+**1. Upload** a PDF. Pre-analysis suggests a page; the guess can be wrong.
+Type the right page number if the table is elsewhere.
+
+**2. Rotate** (⟳) if the table is printed sideways, until it reads upright.
+
+**3. Draw a box** around each table with the mouse, one box per table.
+Include the header row **and the bottom rule of the table**; if the box cuts
+through the last row, that row is lost. Leave figures and captions outside.
+If you draw no box, the whole page is sent.
+
+**4. Extract.** With *Use Claude* off, the free local parser runs first and
+Claude is used only if it reads no values. With it on, Claude reads the
+boxed image directly. The step box under the button shows what is happening.
+
+**5. Review** the table before downloading. Blank cells mean the paper does
+not print that value. Labels can be incomplete (e.g. a table's rows may come
+back without the analyte name); fix them in Excel or redraw the box and run
+again.
+
+**6. Download** Excel (for the form), JSON (every value with its source) or
+the text report.
+
+Cost: Claude reads cost cents per table; the sidebar shows the last run and
+the session total. Uploaded PDFs are kept only in a temporary file for the
+session. Password is shared within the team, do not post it.
+"""
+
+
 def _render_run_status(slot) -> None:
     """Green/red banner with the outcome of the last extraction run."""
     rs = st.session_state.get("run_status")
@@ -350,6 +403,8 @@ def main() -> None:
 
     st.title("BV Extractor")
     st.caption("Extract biological variation tables from a PDF article")
+    with st.expander("How to use", expanded=False):
+        st.markdown(USAGE_NOTES)
 
     uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
     if uploaded is None:
@@ -437,11 +492,13 @@ def main() -> None:
         status_slot.empty()
         with progress_slot.container():
             status = st.status("Extracting…", expanded=True)
+            with status:
+                log_slot = st.empty()
 
         def log(msg: str) -> None:
             line = f"{time.monotonic() - t0:5.1f} s  {msg}"
             steps.append(line)
-            status.write(line)
+            log_slot.markdown(_log_box_html(steps), unsafe_allow_html=True)
 
         if regions:
             pages_txt = ", ".join(str(r.page_index + 1) for r in regions)
@@ -511,7 +568,7 @@ def main() -> None:
         steps = st.session_state.get("steps")
         if steps:
             with st.expander(f"Extraction steps ({len(steps)})", expanded=False):
-                st.code("\n".join(steps), language=None)
+                st.markdown(_log_box_html(steps), unsafe_allow_html=True)
         rows = _result_rows(result)
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)
