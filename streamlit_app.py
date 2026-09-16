@@ -33,7 +33,11 @@ from types import SimpleNamespace
 import streamlit as st
 from PIL import Image
 
+from bv_extractor import __version__
 from bv_extractor.claude_extractor import (
+    DEFAULT_MODEL,
+    PRICE_INPUT_PER_MTOK,
+    PRICE_OUTPUT_PER_MTOK,
     estimate_cost_usd,
     extract_with_claude_regions,
     render_region_png,
@@ -121,9 +125,19 @@ def _save_upload(uploaded) -> str:
     return st.session_state["pdf_path"]
 
 
+@st.cache_data(show_spinner=False)
 def _page_image(pdf_path: str, page_index: int, rotation: int) -> Image.Image:
+    """Render one page; cached so widget reruns don't re-rasterise the PDF."""
     png = render_region_png(pdf_path, page_index, rotation=rotation)
     return Image.open(io.BytesIO(png)).convert("RGB")
+
+
+@st.cache_data(show_spinner=False)
+def _display_image(pdf_path: str, page_index: int, rotation: int) -> Image.Image:
+    """The page scaled to the canvas width (cached, same reason as above)."""
+    img = _page_image(pdf_path, page_index, rotation)
+    disp_h = int(img.height * (DISPLAY_W / img.width))
+    return img.resize((DISPLAY_W, disp_h))
 
 
 def _canvas_drawing(img_disp: Image.Image) -> dict:
@@ -207,6 +221,96 @@ def _fmt(v) -> str:
     return "" if v is None else f"{v:g}"
 
 
+# ---------------------------------------------------------------------------
+# Sidebar: Claude status + cost
+# ---------------------------------------------------------------------------
+
+def _ping_claude() -> tuple[bool, str]:
+    """Check the API key and model access without spending tokens.
+
+    `models.retrieve` is a metadata call: it fails on a missing/invalid key or
+    an unavailable model and costs nothing, so it is safe to press repeatedly.
+    """
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic()
+        m = client.models.retrieve(DEFAULT_MODEL)
+        return True, f"Connected: {getattr(m, 'display_name', None) or m.id}"
+    except Exception as exc:  # noqa: BLE001 - shown to the user verbatim
+        return False, f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _record_usage(result) -> None:
+    """Accumulate token usage of Claude runs for the sidebar cost panel."""
+    rep = result.report
+    if not rep.used_llm_fallback or not (rep.input_tokens or rep.output_tokens):
+        return
+    cost = estimate_cost_usd(rep.input_tokens, rep.output_tokens)
+    st.session_state["last_usage"] = {
+        "in": rep.input_tokens, "out": rep.output_tokens, "cost": cost,
+    }
+    tot = st.session_state.setdefault(
+        "usage_total", {"runs": 0, "in": 0, "out": 0, "cost": 0.0}
+    )
+    tot["runs"] += 1
+    tot["in"] += rep.input_tokens
+    tot["out"] += rep.output_tokens
+    tot["cost"] += cost
+
+
+def render_sidebar() -> None:
+    """Always-visible status panel: Claude availability, model, prices, cost."""
+    with st.sidebar:
+        st.header("Status")
+
+        key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        if key_set:
+            st.success("Claude API key: set")
+        else:
+            st.error("Claude API key: missing")
+            st.caption(
+                "Only the local parser will run. Add ANTHROPIC_API_KEY to "
+                "the app secrets to enable Claude."
+            )
+
+        if st.button("Test Claude connection", disabled=not key_set,
+                     use_container_width=True):
+            with st.spinner("Checking…"):
+                st.session_state["claude_ping"] = _ping_claude()
+        ping = st.session_state.get("claude_ping")
+        if ping is not None:
+            ok, msg = ping
+            (st.success if ok else st.error)(msg)
+
+        st.caption(f"Model: `{DEFAULT_MODEL}`")
+        # No "$" here: Streamlit's Markdown treats `$…$` as LaTeX.
+        st.caption(
+            f"Price: {PRICE_INPUT_PER_MTOK:g} USD in / {PRICE_OUTPUT_PER_MTOK:g} USD "
+            "out, per million tokens"
+        )
+
+        st.divider()
+        st.header("Cost (USD)")
+        last = st.session_state.get("last_usage")
+        tot = st.session_state.get("usage_total")
+        c1, c2 = st.columns(2)
+        c1.metric("Last run", f"${last['cost']:.3f}" if last else "—")
+        c2.metric("This session", f"${tot['cost']:.3f}" if tot else "—")
+        if last:
+            st.caption(f"Last run: {last['in']} in / {last['out']} out tokens")
+        if tot:
+            st.caption(
+                f"Session: {tot['runs']} Claude run(s), "
+                f"{tot['in']} in / {tot['out']} out tokens"
+            )
+        if not last:
+            st.caption("No Claude run yet. The local parser is free.")
+
+        st.divider()
+        st.caption(f"bv_extractor v{__version__} · research prototype")
+
+
 def _result_files(result, stem: str):
     d = Path(tempfile.mkdtemp())
     xb = Path(write_excel(result, d / f"{stem}.xlsx")).read_bytes()
@@ -223,6 +327,7 @@ def main() -> None:
     st.set_page_config(page_title="BV Extractor", layout="wide")
     _inject_api_key()
     require_password()
+    render_sidebar()
 
     st.title("BV Extractor")
     st.caption("Extract biological variation tables from a PDF article")
@@ -253,10 +358,8 @@ def main() -> None:
 
         page_index = st.session_state["page_index"]
         rotation = st.session_state["rotation"]
-        img = _page_image(pdf_path, page_index, rotation)
-        disp_w = DISPLAY_W
-        disp_h = int(img.height * (DISPLAY_W / img.width))
-        img_disp = img.resize((disp_w, disp_h))
+        img_disp = _display_image(pdf_path, page_index, rotation)
+        disp_w, disp_h = img_disp.width, img_disp.height
 
         st.caption(
             "Draw a box around the table(s) (one box per table). If you draw "
@@ -319,6 +422,9 @@ def main() -> None:
                         pdf_path, whole_or_regions()
                     )
             st.session_state["result"] = result
+            _record_usage(result)
+            # Sidebar was drawn before this run; redraw so the cost updates now.
+            st.rerun()
         except Exception as exc:  # noqa: BLE001
             st.session_state["result"] = None
             st.error(f"Extraction error: {exc}")
