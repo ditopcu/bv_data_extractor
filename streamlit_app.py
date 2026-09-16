@@ -416,6 +416,8 @@ def main() -> None:
         # Outcome of the last run, colour-coded, right next to the button.
         status_slot = st.empty()
         _render_run_status(status_slot)
+        # Live step log goes here too, so it is visible without scrolling.
+        progress_slot = st.empty()
 
     if run:
         regions = _regions_from_canvas(
@@ -433,7 +435,8 @@ def main() -> None:
         steps: list = []
         st.session_state["run_status"] = None   # clear the previous outcome
         status_slot.empty()
-        status = st.status("Extracting…", expanded=True)
+        with progress_slot.container():
+            status = st.status("Extracting…", expanded=True)
 
         def log(msg: str) -> None:
             line = f"{time.monotonic() - t0:5.1f} s  {msg}"
