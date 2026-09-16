@@ -451,6 +451,10 @@ def _summarise_field_status(result: ExtractionResult) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _noop(_msg: str) -> None:
+    """Default progress sink: do nothing."""
+
+
 def extract_with_claude(
     pdf_path: str | Path,
     page_index: int,
@@ -458,6 +462,7 @@ def extract_with_claude(
     rotation: int = 0,
     bbox_frac: Optional[Bbox] = None,
     model: str = DEFAULT_MODEL,
+    progress=None,
 ) -> ExtractionResult:
     """Extract a BV table from `pdf_path` using Claude vision.
 
@@ -466,8 +471,12 @@ def extract_with_claude(
     picker's output) or `bbox` (PDF points, upright only) restrict the region;
     pass neither to send the whole page.
 
+    `progress`, if given, is called with a short human-readable message at
+    each stage (render, send, parse) so a UI can show what is happening.
+
     Returns a fully-populated ExtractionResult with source="llm" on every field.
     """
+    progress = progress or _noop
     pdf_path = Path(pdf_path)
     result = ExtractionResult()
     result.report.source_file = str(pdf_path)
@@ -475,16 +484,25 @@ def extract_with_claude(
     result.report.primary_table_was_rotated = bool(rotation % 360)
     result.report.used_llm_fallback = True
 
+    region = "whole page" if bbox_frac is None and bbox is None else "selected box"
+    rot = f", rotated {rotation}°" if rotation % 360 else ""
+    progress(f"Rendering page {page_index + 1} ({region}{rot}) to an image")
     png = render_region_png(
         pdf_path, page_index, rotation=rotation, bbox_frac=bbox_frac, bbox=bbox
     )
+    progress(f"Image ready ({len(png) / 1024:.0f} KB). Sending to {model}…")
     data, usage = _call_claude(png, model)
     result.report.input_tokens, result.report.output_tokens = usage
+    progress(
+        f"Claude answered: {usage[0]} in / {usage[1]} out tokens "
+        f"(~${estimate_cost_usd(*usage):.3f})"
+    )
 
     for rec in data.get("analytes", []):
         analyte = _build_analyte(rec)
         result.analytes.append(analyte)
         result.report.detected_analytes.append(analyte.abbreviation)
+    progress(f"Parsed {len(result.analytes)} analyte row(s) from the reply")
 
     result.dataset = _build_dataset(data.get("dataset", {}))
 
@@ -518,6 +536,7 @@ def extract_with_claude_regions(
     pdf_path: str | Path,
     regions: list,
     model: str = DEFAULT_MODEL,
+    progress=None,
 ) -> ExtractionResult:
     """Extract one BV table per selected region and merge the results.
 
@@ -526,20 +545,25 @@ def extract_with_claude_regions(
     sent to Claude separately — keeping one table per image avoids the model
     conflating two dense tables — then analytes are concatenated and dataset
     fields are filled from the first region that reports them.
+
+    `progress` (optional callable taking a string) receives step messages.
     """
+    progress = progress or _noop
     pdf_path = Path(pdf_path)
     merged = ExtractionResult()
     merged.report.source_file = str(pdf_path)
     merged.report.used_llm_fallback = True
 
     pages: list = []
-    for region in regions:
+    for i, region in enumerate(regions, 1):
+        progress(f"Table {i} of {len(regions)}: page {region.page_index + 1}")
         res = extract_with_claude(
             pdf_path,
             region.page_index,
             rotation=getattr(region, "rotation", 0),
             bbox_frac=getattr(region, "bbox_frac", None),
             model=model,
+            progress=progress,
         )
         merged.analytes.extend(res.analytes)
         merged.report.detected_analytes.extend(res.report.detected_analytes)
@@ -561,6 +585,10 @@ def extract_with_claude_regions(
         f"Token usage: {merged.report.input_tokens} in + "
         f"{merged.report.output_tokens} out across {len(regions)} call(s) "
         f"(~${cost:.3f} at Opus 4.8 rates)."
+    )
+    progress(
+        f"Merged {len(merged.analytes)} row(s) from {len(regions)} table(s); "
+        f"total ~${cost:.3f}"
     )
 
     _summarise_field_status(merged)

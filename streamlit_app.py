@@ -27,6 +27,7 @@ import base64
 import io
 import os
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -124,6 +125,8 @@ def _save_upload(uploaded) -> str:
             if profile.primary_table_page else 0,
             rotation=0,
             result=None,
+            steps=None,
+            run_status=None,
         )
     return st.session_state["pdf_path"]
 
@@ -222,6 +225,19 @@ def _result_rows(result) -> list:
 
 def _fmt(v) -> str:
     return "" if v is None else f"{v:g}"
+
+
+def _render_run_status(slot) -> None:
+    """Green/red banner with the outcome of the last extraction run."""
+    rs = st.session_state.get("run_status")
+    if not rs:
+        return
+    kind, msg = rs
+    with slot.container():
+        if kind == "ok":
+            st.success(f"✅ {msg}")
+        else:
+            st.error(f"❌ {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +413,9 @@ def main() -> None:
             "finds nothing."
         )
         run = st.button("Extract ▶", type="primary")
+        # Outcome of the last run, colour-coded, right next to the button.
+        status_slot = st.empty()
+        _render_run_status(status_slot)
 
     if run:
         regions = _regions_from_canvas(
@@ -408,34 +427,88 @@ def main() -> None:
                 page_index=page_index, rotation=rotation, bbox_frac=None,
             )]
 
+        # Live step log: shown in an open status box while the run is going,
+        # and kept in session_state so it can be re-shown under the results.
+        t0 = time.monotonic()
+        steps: list = []
+        st.session_state["run_status"] = None   # clear the previous outcome
+        status_slot.empty()
+        status = st.status("Extracting…", expanded=True)
+
+        def log(msg: str) -> None:
+            line = f"{time.monotonic() - t0:5.1f} s  {msg}"
+            steps.append(line)
+            status.write(line)
+
+        if regions:
+            pages_txt = ", ".join(str(r.page_index + 1) for r in regions)
+            log(f"{len(regions)} box(es) drawn on page(s) {pages_txt}")
+        else:
+            log(f"No box drawn: the whole page {page_index + 1} will be used")
+
         try:
             if not use_claude:
+                log("Running the local parser (free, no Claude)…")
                 result = extract(pdf_path)
                 if result.report.fields_extracted:
-                    st.success(f"Parser found {len(result.analytes)} analyte(s).")
-                else:
-                    st.info("Parser found no values — sending to Claude…")
-                    with st.spinner("Claude is extracting… (15–90 s)"):
-                        result = extract_with_claude_regions(
-                            pdf_path, whole_or_regions()
-                        )
-            else:
-                with st.spinner("Claude is extracting… (15–90 s)"):
-                    result = extract_with_claude_regions(
-                        pdf_path, whole_or_regions()
+                    log(
+                        f"Local parser: {len(result.analytes)} analyte(s), "
+                        f"{len(result.report.fields_extracted)} value(s). Done."
                     )
+                else:
+                    log(
+                        f"Local parser: {len(result.analytes)} name(s) matched "
+                        "but no values read. Switching to Claude…"
+                    )
+                    result = extract_with_claude_regions(
+                        pdf_path, whole_or_regions(), progress=log
+                    )
+            else:
+                log("Claude requested directly (local parser skipped)")
+                result = extract_with_claude_regions(
+                    pdf_path, whole_or_regions(), progress=log
+                )
+            n = len(result.analytes)
+            if n:
+                log(f"Finished: {n} row(s) ready for review")
+                status.update(label="Extraction finished", state="complete",
+                              expanded=False)
+                st.session_state["run_status"] = (
+                    "ok", f"Extract successful. Table is ready: {n} row(s). "
+                          "See Results below."
+                )
+            else:
+                log("Finished, but no rows were read from the selected region")
+                status.update(label="Extraction finished with no rows",
+                              state="error", expanded=True)
+                st.session_state["run_status"] = (
+                    "error", "Extract not successful: no rows were read. "
+                             "Check the page and draw the box around the table."
+                )
             st.session_state["result"] = result
+            st.session_state["steps"] = steps
             _record_usage(result)
             # Sidebar was drawn before this run; redraw so the cost updates now.
             st.rerun()
         except Exception as exc:  # noqa: BLE001
+            log(f"ERROR: {exc}")
+            status.update(label="Extraction failed", state="error", expanded=True)
             st.session_state["result"] = None
-            st.error(f"Extraction error: {exc}")
+            st.session_state["steps"] = steps
+            st.session_state["run_status"] = ("error", f"Extract not successful: {exc}")
+            _render_run_status(status_slot)
 
     # ---- results -------------------------------------------------------
     result = st.session_state.get("result")
     if result:
         st.subheader("Results")
+        rs = st.session_state.get("run_status")
+        if rs and rs[0] == "ok":
+            st.success(f"✅ {rs[1]}")
+        steps = st.session_state.get("steps")
+        if steps:
+            with st.expander(f"Extraction steps ({len(steps)})", expanded=False):
+                st.code("\n".join(steps), language=None)
         rows = _result_rows(result)
         if rows:
             st.dataframe(rows, use_container_width=True, hide_index=True)
